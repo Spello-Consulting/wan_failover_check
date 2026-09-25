@@ -29,8 +29,8 @@ When running in monitor mode, it repeats the check on a timer and logs transitio
 ## Project files
 
 - `wan_check.py`: main monitor and optional status API
-- `launch.sh`: launcher script that loads `.env`, runs `uv sync`, and starts the app
-- `manage_backblaze.sh`: helper that switches a Backblaze-related script based on current WAN state
+- `scripts/launch.sh`: launcher script that loads `.env`, runs `uv sync`, and starts the app
+- `scripts/manage_backblaze.sh`: helper that switches a Backblaze-related script based on current WAN state
 - `status.json`: latest observed WAN state
 - `failover_history.csv`: history of backup WAN periods, created automatically
 - `pyproject.toml`: project metadata and dependencies
@@ -239,9 +239,9 @@ If they all fail, the check fails for that cycle.
 
 ## Helper scripts
 
-### `launch.sh`
+### `scripts/launch.sh`
 
-`launch.sh` is a convenience wrapper for starting the application consistently.
+`scripts/launch.sh` is a convenience wrapper for starting the application consistently.
 
 It:
 
@@ -256,24 +256,24 @@ It:
 Default usage:
 
 ```bash
-./launch.sh
+./scripts/launch.sh
 ```
 
 Override the working directory:
 
 ```bash
-./launch.sh --homedir /path/to/wan_failover_check
+./scripts/launch.sh --homedir /path/to/wan_failover_check
 ```
 
 Pass normal app arguments through the launcher:
 
 ```bash
-./launch.sh --onetime --nbn-ip 180.150.43.236
+./scripts/launch.sh --onetime --nbn-ip 180.150.43.236
 ```
 
-### `manage_backblaze.sh`
+### `scripts/manage_backblaze.sh`
 
-`manage_backblaze.sh` uses the current WAN state to switch an external Backblaze helper script between two modes.
+`scripts/manage_backblaze.sh` uses the current WAN state to switch an external Backblaze helper script between two modes.
 
 It:
 

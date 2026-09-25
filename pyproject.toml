@@ -1,6 +1,6 @@
 [project]
 name = "wan-failover-check"
-version = "0.1.0"
+version = "1.0.0"
 description = "WAN Failover Check"
 readme = "README.md"
 requires-python = ">=3.13"
@@ -12,3 +12,6 @@ dependencies = [
     "requests>=2.33.0",
     "uvicorn>=0.42.0",
 ]
+
+[tool.pyutil]
+managed_scripts = ["launch.sh"]
