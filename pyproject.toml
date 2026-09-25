@@ -13,5 +13,12 @@ dependencies = [
     "uvicorn>=0.42.0",
 ]
 
+[project.optional-dependencies]
+all = [
+    "pre-commit>=4.6.1",
+    "pytest>=9.1.1",
+    "pytest-dotenv>=0.5.2",
+]
+
 [tool.pyutil]
 managed_scripts = ["launch.sh"]
