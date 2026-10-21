@@ -167,7 +167,20 @@ Fields:
 - `timestamp`: UTC timestamp of the recorded status
 - `on_primary`: `true` when the app believes the connection is on NBN
 - `status`: human-readable state label
-- `external_ip`: detected public IP address
+- `external_ip`: detected public IP address, or `null` when it could not be determined
+
+If every IP echo service fails (for example, no internet access or DNS resolution is broken), `status.json` is overwritten with a `No internet` state so the status API never serves stale data:
+
+```json
+{
+	"timestamp": "2026-10-22T10:19:10Z",
+	"on_primary": false,
+	"status": "No internet",
+	"external_ip": null
+}
+```
+
+The failover CSV is not updated and no heartbeat is sent in this state.
 
 ### `failover_history.csv`
 
@@ -235,7 +248,7 @@ The app tries the following services in order until one returns a usable IP:
 - `https://ifconfig.me/ip`
 - `https://checkip.amazonaws.com`
 
-If they all fail, the check fails for that cycle.
+If they all fail, the check fails for that cycle and `status.json` is set to the `No internet` state.
 
 ## Helper scripts
 

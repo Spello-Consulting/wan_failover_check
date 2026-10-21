@@ -36,6 +36,7 @@ HEARTBEAT_LTE = os.getenv("HEARTBEAT_LTE")
 INTERVAL = int(os.getenv("MONITOR_INTERVAL", "60"))
 HTTP_TIMEOUT = 8
 STATUS_FILE = "status.json"
+NO_INTERNET_STATE = "No internet"
 FAILOVER_CSV_FILE = os.getenv("FAILOVER_CSV_FILE", "failover_history.csv")
 FAILOVER_CSV_HEADERS = ["Start Time", "End Time", "Duration Hours"]
 LOCAL_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
@@ -137,8 +138,14 @@ def heartbeat_enabled(*, noheartbeat: bool) -> bool:
     return not noheartbeat and bool(HEARTBEAT_PRIMARY)
 
 
-def write_status(is_primary: bool, state: str, ip: str) -> None:
-    """Write the current WAN status to STATUS_FILE."""
+def write_status(is_primary: bool, state: str, ip: str | None) -> None:
+    """Write the current WAN status to STATUS_FILE.
+
+    Args:
+        is_primary (bool): True if on primary WAN, False otherwise.
+        state (str): Human-readable state string.
+        ip (str | None): The current external IP address, or None if it could not be determined.
+    """
     payload = {
         "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "on_primary": is_primary,
@@ -285,8 +292,18 @@ def check_wan(*, nbn_ip: str, write_file: bool, send_heartbeat: bool) -> tuple[b
         state (str): Human-readable state string, e.g. "NBN (primary)" or "5G Backup".
         external_ip (str): The current external IP address.
         heartbeat_ok (bool | None): True if heartbeat succeeded, False if it failed, or None if not sent.
+
+    Raises:
+        RuntimeError: If the external IP could not be determined. When write_file is set, the
+            status file is updated to the "No internet" state before the error is re-raised so
+            the status API does not serve stale data.
     """
-    ip = get_external_ip()
+    try:
+        ip = get_external_ip()
+    except RuntimeError:
+        if write_file:
+            write_status(False, NO_INTERNET_STATE, None)
+        raise
     primary = on_nbn(ip, nbn_ip)
     state = "NBN (primary)" if primary else "5G Backup"
 
