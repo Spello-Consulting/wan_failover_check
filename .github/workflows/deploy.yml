@@ -1,0 +1,37 @@
+name: Deploy wan_failover_check
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment'
+        required: true
+        type: choice
+        options:
+          - sydneyapp
+
+jobs:
+  deploy-sydneyapp:
+    name: Deploy wan_failover_check → sydneyapp
+    if: ${{ inputs.environment == 'sydneyapp' }}
+    runs-on: [self-hosted, sydneyapp]
+    environment: sydneyapp        # triggers approval gate if configured in GitHub
+    steps:
+      - name: Stop the service
+        run: |
+          sudo --chdir=/home/nick/scripts/wan_failover_check /home/nick/scripts/pyutil/servicectrl.sh stop
+
+      - name: Pull latest from GitHub
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          sudo --chdir=/home/nick/scripts/wan_failover_check /home/nick/scripts/pyutil/gitrefresh.sh --yes --branch "$BRANCH"
+
+      - name: Deploy and start the service
+        run: sudo --chdir=/home/nick/scripts/wan_failover_check /home/nick/scripts/pyutil/servicectrl.sh deploy sydneyapp
+
+      - name: Verify service is running
+        run: |
+          sleep 6
+          sudo --chdir=/home/nick/scripts/wan_failover_check /home/nick/scripts/pyutil/servicectrl.sh is-active
+
