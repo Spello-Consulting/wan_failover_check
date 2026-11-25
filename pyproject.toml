@@ -1,24 +1,50 @@
 [project]
 name = "wan-failover-check"
-version = "1.0.2"
+version = "2.0.0"
 description = "WAN Failover Check"
 readme = "README.md"
 requires-python = ">=3.13"
 service_name="wan-failover-check"
-launch_path="wan_check.py"
+launch_path="src/main.py"
 dependencies = [
     "fastapi>=0.135.2",
-    "flask>=3.1.3",
+    "python-dotenv>=1.2.2",
     "requests>=2.33.0",
+    "sc-foundation-services>=3.6.2",
     "uvicorn>=0.42.0",
 ]
 
 [project.optional-dependencies]
 all = [
+    "httpx>=0.28.1",
+    "mypy>=1.18.2",
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
     "pytest-dotenv>=0.5.2",
+    "pytest-mock>=3.15.1",
+    "types-requests>=2.32.4",
 ]
 
 [tool.pyutil]
 managed_scripts = ["launch.sh"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+include-package-data = true
+zip-safe = false
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+
+[tool.mypy]
+strict = true
+mypy_path = "src"
+explicit_package_bases = true
+
+[[tool.mypy.overrides]]
+# sc-foundation-services does not ship a py.typed marker.
+module = ["sc_foundation", "sc_foundation.*"]
+ignore_missing_imports = true
