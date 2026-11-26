@@ -2,57 +2,59 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
   "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Single launchd USER agent that runs all the daily finance jobs in sequence.
-  Must be a user agent (not a daemon / cron) so Excel and Banktivity AppleScript
-  automation runs inside the GUI login session.
+  launchd USER agent that runs WAN Failover Check continuously, the macOS
+  equivalent of sydneyapp/wan-failover-check.service.
 
   Install:
-    cp deploy/com.elseyworld.finance-orchestrator.plist ~/Library/LaunchAgents/
-    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.elseyworld.finance-orchestrator.plist
+    cp deploy/com.elseyworld.wan_failover_check.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.elseyworld.wan_failover_check.plist
   Test now:
-    launchctl kickstart -k gui/$(id -u)/com.elseyworld.finance-orchestrator
+    launchctl kickstart -k gui/$(id -u)/com.elseyworld.wan_failover_check
+  Stop / uninstall:
+    launchctl bootout gui/$(id -u)/com.elseyworld.wan_failover_check
 
-  No 1Password token here: each project script loads
+  No 1Password token here: scripts/launch.sh loads
   ~/.config/op/service-account-token itself.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.elseyworld.finance-orchestrator</string>
+    <string>com.elseyworld.wan_failover_check</string>
 
-    <!-- Apple-signed /bin/bash for a stable TCC identity (see the old agents).
-         orchestrate.sh re-execs itself under caffeinate -d -i -m -s -u. -->
+    <!-- Apple-signed /bin/bash for a stable TCC identity. -->
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>/Users/nick/scripts/finance_orchestrator/scripts/orchestrate.sh</string>
+        <string>/Users/nick/scripts/wan_failover_check/scripts/launch.sh</string>
     </array>
 
-    <!-- Matches the pmset wake at 05:00. launchd runs a missed calendar job
-         when the Mac wakes. -->
-    <key>StartCalendarInterval</key>
-    <dict>
-        <key>Hour</key>   <integer>5</integer>
-        <key>Minute</key> <integer>0</integer>
-    </dict>
-
     <key>WorkingDirectory</key>
-    <string>/Users/nick/scripts/finance_orchestrator</string>
+    <string>/Users/nick/scripts/wan_failover_check</string>
 
     <key>RunAtLoad</key>
-    <false/>
+    <true/>
+
+    <!-- Restart only on a non-zero exit (crash); a graceful shutdown exits 0.
+         Mirrors Restart=on-failure / RestartSec=10 in the systemd unit. -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
 
     <key>StandardOutPath</key>
-    <string>/Users/nick/scripts/finance_orchestrator/logs/user_agent.log</string>
+    <string>/Users/nick/scripts/wan_failover_check/logs/user_agent.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/nick/scripts/finance_orchestrator/logs/user_agent.log</string>
+    <string>/Users/nick/scripts/wan_failover_check/logs/user_agent.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
         <key>HOME</key>
         <string>/Users/nick</string>
         <key>PATH</key>
-        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>/Users/nick/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
     </dict>
 </dict>
 </plist>
