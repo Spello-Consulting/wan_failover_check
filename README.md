@@ -16,7 +16,7 @@ From each check the app can:
 - keep a CSV history of failover periods
 - send Better Stack heartbeats (a "fail" heartbeat while on the backup connection)
 - serve the latest state over HTTP at `GET /status`
-- drive helper automation such as Backblaze mode switching
+- run a script of your own when the WAN moves between primary and backup
 
 ## Prerequisites
 
@@ -48,7 +48,6 @@ src/
   status_api.py         FastAPI app for GET /status
 scripts/
   launch.sh             standard launcher (pyutil-managed; do not edit here)
-  manage_backblaze.sh   switches Backblaze mode based on the WAN state
 deploy/sydneyapp/       systemd service file for the production host
 tests/                  pytest suite
 ```
@@ -327,19 +326,6 @@ else
 fi
 ```
 
-## Backblaze helper
-
-`scripts/manage_backblaze.sh` runs `src/main.py --onprimary` and switches the external Backblaze
-toggle script to `continuous` mode on the primary connection, or `manual` mode on the backup.
-
-```bash
-./scripts/manage_backblaze.sh                                  # uses $APP_CONFIG or configs/production.yaml
-./scripts/manage_backblaze.sh --config configs/development.yaml
-```
-
-It expects the toggle script at
-`$HOME/scripts/toggle_backblaze_settings/toggle_backblaze_settings.sh`.
-
 ## Deployment
 
 The `Deploy wan_failover_check` GitHub workflow and `deploy/auto-deploy.yaml` deploy to
@@ -387,7 +373,7 @@ from environment variables to YAML:
 | `API_PORT`                        | `StatusAPI.Port`                                 |
 | `FAILOVER_CSV_FILE`               | `WAN.FailoverHistoryFile`                        |
 | `wan_check.py`                    | `src/main.py`                                    |
-| `manage_backblaze.sh` (repo root) | `scripts/manage_backblaze.sh`                    |
+| `manage_backblaze.sh`             | removed: use `General.StateChangeScript`         |
 
 `status.json` keeps its 1.x fields and adds `reverse_dns`. Existing failover history files are
 read and updated without changes.

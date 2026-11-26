@@ -11,8 +11,8 @@ Branch: `issue-4-refactor-rdns` · Status: approved and implemented (v2.0.0)
    public IP and treat the connection as primary when it matches a configured pattern such as
    `*.aussiebb.net`.
 3. Keep today's external behaviour (status file, failover CSV, heartbeats, `/status` API,
-   `--onetime` / `--onprimary` / `--noheartbeat`) so `manage_backblaze.sh` and anything reading
-   `/status` keep working.
+   `--onetime` / `--onprimary` / `--noheartbeat`) so scripts and anything reading `/status`
+   keep working.
 
 ## Target layout
 
@@ -41,7 +41,6 @@ tests/
   test_state_change_script.py
 scripts/
   launch.sh             unchanged (pyutil-managed)
-  manage_backblaze.sh   moved from repo root, updated to call src/main.py
 deploy/sydneyapp/wan-failover-check.service   add EnvironmentFile line from template
 .env.dev.template / .env.prod.template        APP_ENV + APP_CONFIG only
 .pre-commit-config.yaml                       ggshield, from template
@@ -143,7 +142,7 @@ module, because `JSONEncoder.read_from_file` converts the ISO timestamp into a `
 
 `--nbn-ip` is removed (no static IP any more). In `--onprimary` mode the logger's console
 verbosity is forced to `error` and the startup banner goes to stderr, so stdout carries only
-`Yes`/`No` for `manage_backblaze.sh`. Exit codes stay as documented today.
+`Yes`/`No` for scripts. Exit codes stay as documented today.
 
 Monitor mode follows the eufy-siren pattern: SIGINT/SIGTERM set a `stop_event`; a
 `ThreadManager` runs the monitor loop and (when enabled) the API server thread; uvicorn is
@@ -152,6 +151,8 @@ existing ×1/×2/×3 back-off on consecutive errors is kept. Fatal errors use
 `logger.log_fatal_error` (fatal-error file + recovery email, as in the template).
 
 ## State change script (added after review)
+
+This replaces `manage_backblaze.sh`, which polled `--onprimary` and has been removed from the repo.
 
 `General.StateChangeScript` names an optional executable, resolved from the project root and
 checked at start-up (missing or not executable is a startup error, exit 1). It runs as
@@ -169,7 +170,7 @@ failure to start, or a 60 s timeout is logged as an error and the monitor carrie
 ## Docs
 
 README rewritten around the new layout: setup (`ln -s .env.dev.template .env.target`),
-config reference for every YAML key, detection logic, run modes, outputs, API, Backblaze helper,
+config reference for every YAML key, detection logic, run modes, outputs, API, state change script,
 systemd/deploy, development commands, and a short "upgrading from 1.x" section mapping each old
 environment variable to its YAML key.
 
