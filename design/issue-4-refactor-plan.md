@@ -28,6 +28,7 @@ src/
   wan_monitor.py        one check + outputs + heartbeat, and the monitor loop with back-off
   status_store.py       write / read status.json (JSONEncoder)
   failover_history.py   open / close failover rows in the CSV (CSVReader)
+  state_change_script.py  runs General.StateChangeScript on primary/backup changes
   status_api.py         FastAPI app + uvicorn server thread with clean shutdown
 tests/
   conftest.py           from template (op inject is skipped when no .env.test.template)
@@ -37,6 +38,7 @@ tests/
   test_failover_history.py
   test_status_api.py
   test_wan_monitor.py
+  test_state_change_script.py
 scripts/
   launch.sh             unchanged (pyutil-managed)
   manage_backblaze.sh   moved from repo root, updated to call src/main.py
@@ -59,6 +61,7 @@ only `APP_ENV` and `APP_CONFIG` (there are no secrets in this app).
 General:
   AppName: wan-failover-check
   CheckInterval: 60            # seconds between checks (was MONITOR_INTERVAL)
+  StateChangeScript: scripts/wan_state_change.sh   # optional, added after review
 
 WAN:
   PrimaryMatch:                # fnmatch globs tested against the PTR name, case-insensitive
@@ -147,6 +150,21 @@ Monitor mode follows the eufy-siren pattern: SIGINT/SIGTERM set a `stop_event`; 
 stopped via `server.should_exit` on shutdown, so `systemctl stop` exits 0 cleanly. The
 existing ×1/×2/×3 back-off on consecutive errors is kept. Fatal errors use
 `logger.log_fatal_error` (fatal-error file + recovery email, as in the template).
+
+## State change script (added after review)
+
+`General.StateChangeScript` names an optional executable, resolved from the project root and
+checked at start-up (missing or not executable is a startup error, exit 1). It runs as
+`<script> --on_primary true|false` with `WAN_STATUS`, `WAN_EXTERNAL_IP` and `WAN_REVERSE_DNS` in
+its environment and the project root as its working directory.
+
+The trigger is the failover history's `OPENED` / `CLOSED` event, not an in-memory comparison.
+The CSV already persists the last known state, so a change runs the script exactly once, even
+across restarts and when a cron `--onprimary` run sees the change before the monitor does.
+Error states never touch the history, so they never trigger the script.
+
+Output is captured and logged (stdout stays clean for `--onprimary`). A non-zero exit, a
+failure to start, or a 60 s timeout is logged as an error and the monitor carries on.
 
 ## Docs
 

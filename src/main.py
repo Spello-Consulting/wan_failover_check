@@ -25,6 +25,7 @@ from sc_foundation import (
 
 from config_schemas import ConfigSchema
 from failover_history import FailoverHistory
+from state_change_script import StateChangeScript, resolve_script_path
 from status_api import StatusAPIServer
 from wan_detector import WANDetector
 from wan_monitor import WANMonitor
@@ -217,6 +218,25 @@ def resolve_data_file(file_name: str) -> Path:
     return Path(path) if path is not None else Path(file_name).resolve()
 
 
+def build_state_change_script(config: SCConfigManager) -> StateChangeScript | None:
+    """Create the state change script runner if General.StateChangeScript is set.
+
+    Args:
+        config: The configuration manager.
+
+    Returns:
+        The script runner, or None if no script is configured.
+
+    Raises:
+        ValueError: If the configured script does not exist or is not executable.
+    """  # noqa: DOC502
+    path_text = config.get("General", "StateChangeScript", default=None)
+    if not path_text or not str(path_text).strip():
+        return None
+    project_root = Path(SCCommon.get_project_root())
+    return StateChangeScript(resolve_script_path(str(path_text).strip(), project_root), working_dir=project_root)
+
+
 def build_monitor(config: SCConfigManager, logger: SCLogger, send_heartbeat: bool) -> WANMonitor:
     """Create the WAN monitor from the configuration.
 
@@ -227,7 +247,10 @@ def build_monitor(config: SCConfigManager, logger: SCLogger, send_heartbeat: boo
 
     Returns:
         The configured monitor.
-    """
+
+    Raises:
+        ValueError: If the configured state change script is missing or not executable.
+    """  # noqa: DOC502
     detector = WANDetector(
         primary_patterns=list(config.get("WAN", "PrimaryMatch", default=[])),
         primary_label=str(config.get("WAN", "PrimaryLabel", default=None) or "NBN (primary)"),
@@ -243,6 +266,7 @@ def build_monitor(config: SCConfigManager, logger: SCLogger, send_heartbeat: boo
         logger=logger,
         check_interval=float(config.get("General", "CheckInterval", default=None) or DEFAULT_CHECK_INTERVAL),
         send_heartbeat=send_heartbeat,
+        state_change_script=build_state_change_script(config),
     )
 
 
@@ -311,6 +335,8 @@ def run_monitor(monitor: WANMonitor, api: StatusAPIServer | None, logger: SCLogg
 
     if not monitor.send_heartbeat:
         logger.log_message("Heartbeats disabled.", "summary")
+    if monitor.state_change_script is not None:
+        logger.log_message(f"State change script: {monitor.state_change_script.path}", "summary")
     logger.log_message(
         f"Monitoring started. Primary WAN match: {', '.join(monitor.detector.primary_patterns)}  Interval: {monitor.check_interval:g}s",
         "summary",

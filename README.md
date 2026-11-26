@@ -44,6 +44,7 @@ src/
   wan_monitor.py        runs checks, writes outputs, sends heartbeats, monitor loop
   status_store.py       reads and writes status.json
   failover_history.py   maintains the failover history CSV
+  state_change_script.py  runs the optional script on primary/backup changes
   status_api.py         FastAPI app for GET /status
 scripts/
   launch.sh             standard launcher (pyutil-managed; do not edit here)
@@ -92,10 +93,11 @@ with an error that names the bad setting if validation fails.
 
 ### `General`
 
-| Key             | Default              | Meaning                                       |
-| --------------- | -------------------- | --------------------------------------------- |
-| `AppName`       | —                    | Informational                                 |
-| `CheckInterval` | `60`                 | Seconds between checks in monitor mode (5–3600) |
+| Key                 | Default | Meaning                                                                       |
+| ------------------- | ------- | ----------------------------------------------------------------------------- |
+| `AppName`           | —       | Informational                                                                 |
+| `CheckInterval`     | `60`    | Seconds between checks in monitor mode (5–3600)                               |
+| `StateChangeScript` | none    | Executable to run when the WAN moves between primary and backup. See [State change script](#state-change-script). |
 
 ### `WAN`
 
@@ -183,6 +185,7 @@ In monitor mode the app:
 - checks the WAN every `CheckInterval` seconds, writing `status.json` and the failover CSV
 - sends heartbeats unless disabled
 - logs a summary line whenever the state changes, and a detailed line on every check
+- runs the `StateChangeScript`, if set, when the WAN moves between primary and backup
 - backs off to 2× and then 3× the interval after consecutive failed checks or heartbeats
 - shuts down cleanly on Ctrl-C or SIGTERM (`systemctl stop`)
 
@@ -267,6 +270,62 @@ curl http://127.0.0.1:8087/status
 
 The endpoint returns HTTP `503` with an `error` field if the status file doesn't exist yet or
 can't be read.
+
+## State change script
+
+Set `General.StateChangeScript` to have the app run a script whenever the WAN moves from primary
+to backup or back again:
+
+```yaml
+General:
+  StateChangeScript: scripts/wan_state_change.sh
+```
+
+The script is called with one argument pair giving the new state:
+
+```bash
+scripts/wan_state_change.sh --on_primary true    # now on the primary connection
+scripts/wan_state_change.sh --on_primary false   # now on the backup connection
+```
+
+It also gets these environment variables:
+
+| Variable          | Value                                              |
+| ----------------- | -------------------------------------------------- |
+| `WAN_STATUS`      | The state label, e.g. `5G Backup`                  |
+| `WAN_EXTERNAL_IP` | The public IP                                      |
+| `WAN_REVERSE_DNS` | The PTR name, or empty if there is none            |
+
+How it behaves:
+
+- **When it runs.** The trigger is the failover history: the script runs when a failover row is
+  opened (primary → backup) or closed (backup → primary). The history file holds the last known
+  state, so each change runs the script once, even across restarts, and whether the change is
+  first seen in monitor mode or by an `--onetime` / `--onprimary` run. Nothing runs on a check
+  that finds the same state, or at start-up when the state hasn't changed.
+- **What doesn't count as a change.** `No internet` and `DNS lookup failed` don't run the script.
+  Going primary → no internet → primary runs nothing; primary → no internet → backup runs it once.
+- **Where it runs.** The working directory is the project root, and a relative path is resolved
+  from there. The script must exist and be executable (`chmod +x`), or the app exits at start-up
+  with a configuration error.
+- **Output and failures.** Stdout and stderr are captured and written to the log, so
+  `--onprimary` output stays `Yes` / `No`. A non-zero exit code, a failure to start, or a run
+  longer than 60 seconds (the script is then killed) is logged as an error; the app carries on.
+  Checks wait while the script runs, so keep it short.
+- **If the history file can't be read or written,** the change can't be detected and the script
+  doesn't run. The error is logged.
+
+A minimal script:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${2:-}" == "true" ]]; then
+    echo "Back on ${WAN_STATUS}"
+else
+    echo "Failed over to ${WAN_STATUS}"
+fi
+```
 
 ## Backblaze helper
 

@@ -3,6 +3,9 @@
 General:
   AppName: wan-failover-check
   CheckInterval: 30
+  # Optional executable run with --on_primary true|false when the WAN moves between primary and
+  # backup. Relative paths are from the project root.
+  # StateChangeScript: scripts/wan_state_change.sh
 
 WAN:
   # Glob patterns matched (case-insensitively) against the reverse DNS name of the public IP.

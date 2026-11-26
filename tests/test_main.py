@@ -22,6 +22,7 @@ CONFIG = textwrap.dedent(
     General:
       AppName: wan-failover-check
       CheckInterval: 30
+      StateChangeScript: {script}
     WAN:
       PrimaryMatch:
         - "*.aussiebb.net"
@@ -56,7 +57,7 @@ def project(tmp_path, monkeypatch):
     """
     monkeypatch.delenv("SC_FOUNDATION_PROJECT_ROOT", raising=False)
     monkeypatch.chdir(tmp_path)
-    (tmp_path / "config.yaml").write_text(CONFIG.format(api="True"), encoding="utf-8")
+    (tmp_path / "config.yaml").write_text(CONFIG.format(api="True", script=""), encoding="utf-8")
     return tmp_path
 
 
@@ -181,7 +182,7 @@ def test_monitor_mode_runs_and_stops_on_sigterm(project, lookups, mocker, restor
     with socket.socket() as port_holder:
         port_holder.bind(("127.0.0.1", 0))
         port = port_holder.getsockname()[1]
-    (project / "config.yaml").write_text(CONFIG.format(api="True").replace("Port: 8099", f"Port: {port}"), encoding="utf-8")
+    (project / "config.yaml").write_text(CONFIG.format(api="True", script="").replace("Port: 8099", f"Port: {port}"), encoding="utf-8")
     heartbeat = mocker.patch("sc_foundation.sc_logging.requests.get")
     heartbeat.return_value.status_code = 200
     seen = {}
@@ -208,16 +209,47 @@ def test_monitor_mode_runs_and_stops_on_sigterm(project, lookups, mocker, restor
 
 
 def test_build_status_api_disabled(project):
-    (project / "config.yaml").write_text(CONFIG.format(api="False"), encoding="utf-8")
+    (project / "config.yaml").write_text(CONFIG.format(api="False", script=""), encoding="utf-8")
     config, _ = main.initialize_config_and_logging(parse_command_line_args(["--homedir", str(project), "--config", "config.yaml"]))
 
     assert build_status_api(config, project / "status.json") is None
 
 
 def test_invalid_config_exits(project):
-    (project / "config.yaml").write_text(CONFIG.format(api="True").replace('- "*.aussiebb.net"', ""), encoding="utf-8")
+    (project / "config.yaml").write_text(CONFIG.format(api="True", script="").replace('- "*.aussiebb.net"', ""), encoding="utf-8")
 
     with pytest.raises(SystemExit) as exc_info:
         main.main(["--homedir", str(project), "--config", "config.yaml", "--onetime"])
 
     assert exc_info.value.code == 1
+
+
+def _with_script(project, script_text):
+    (project / "config.yaml").write_text(CONFIG.format(api="True", script=script_text), encoding="utf-8")
+
+
+def test_onprimary_runs_state_change_script_without_touching_stdout(project, lookups, capsys):
+    (project / "scripts").mkdir()
+    hook = project / "scripts" / "hook.sh"
+    hook.write_text('#!/bin/sh\necho "$*" >> calls.txt\necho noisy\n', encoding="utf-8")
+    hook.chmod(0o755)
+    _with_script(project, "scripts/hook.sh")
+    lookups["hostname"] = "cpe.mobile.example.net"
+
+    assert main.main(["--homedir", str(project), "--config", "config.yaml", "--onprimary"]) == 0
+    assert capsys.readouterr().out == "No\n"
+    lookups["hostname"] = PRIMARY_PTR
+    assert main.main(["--homedir", str(project), "--config", "config.yaml", "--onprimary"]) == 0
+    assert capsys.readouterr().out == "Yes\n"
+
+    assert (project / "calls.txt").read_text(encoding="utf-8").splitlines() == ["--on_primary false", "--on_primary true"]
+
+
+@pytest.mark.usefixtures("lookups")
+def test_missing_state_change_script_exits_1(project, capsys):
+    _with_script(project, "scripts/missing.sh")
+
+    exit_code = main.main(["--homedir", str(project), "--config", "config.yaml", "--onetime"])
+
+    assert exit_code == 1
+    assert "StateChangeScript" in capsys.readouterr().err

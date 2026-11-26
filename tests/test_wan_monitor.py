@@ -1,6 +1,7 @@
 """Tests for src/wan_monitor.py."""
 
 import json
+import subprocess  # noqa: S404 - builds CompletedProcess results
 import threading
 from unittest.mock import MagicMock
 
@@ -165,3 +166,106 @@ def test_run_backs_off_on_errors(monitor, lookups):
 
     timeouts = [call.kwargs["timeout"] for call in stop_event.wait.call_args_list]
     assert timeouts == pytest.approx([0.01, 0.02, 0.03, 0.03])
+
+
+class RecordingScript:
+    """Stands in for StateChangeScript and records each call."""
+
+    def __init__(self, returncode=0, stdout="", stderr="", error=None):
+        self.calls = []
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        self.error = error
+
+    @staticmethod
+    def command(on_primary):
+        return ["hook.sh", "--on_primary", "true" if on_primary else "false"]
+
+    def run(self, status):
+        self.calls.append(status.on_primary)
+        if self.error:
+            raise self.error
+        return subprocess.CompletedProcess(self.command(status.on_primary), self.returncode, self.stdout, self.stderr)
+
+
+@pytest.fixture
+def script(monitor):
+    recorder = RecordingScript()
+    monitor.state_change_script = recorder
+    return recorder
+
+
+def _messages(logger, level=None):
+    return [call.args[0] for call in logger.log_message.call_args_list if level is None or call.args[1] == level]
+
+
+def test_state_change_script_runs_on_each_transition(monitor, lookups, script):
+    monitor.check_once()  # primary, nothing open: no change
+    lookups.hostname = BACKUP_PTR
+    monitor.check_once()  # primary -> backup
+    monitor.check_once()  # still backup
+    lookups.hostname = PRIMARY_PTR
+    monitor.check_once()  # backup -> primary
+    monitor.check_once()  # still primary
+
+    assert script.calls == [False, True]
+
+
+def test_state_change_script_ignores_error_states(monitor, lookups, script):
+    lookups.hostname = BACKUP_PTR
+    monitor.check_once()
+    lookups.ip_error = RuntimeError("down")
+    monitor.check_once()
+    lookups.ip_error = None
+    monitor.check_once()  # back on backup after the outage: not a change
+
+    assert script.calls == [False]
+
+
+def test_state_change_script_uses_persisted_state(monitor, lookups, script, tmp_path, logger):
+    """A monitor started while a failover is already open does not re-run the script."""
+    lookups.hostname = BACKUP_PTR
+    monitor.check_once()
+    restarted = WANMonitor(
+        detector=monitor.detector,
+        status_file=tmp_path / "status.json",
+        history=FailoverHistory(tmp_path / "history.csv"),
+        logger=logger,
+        state_change_script=script,
+    )
+
+    restarted.check_once()
+
+    assert script.calls == [False]
+
+
+def test_state_change_script_failure_is_logged(monitor, lookups, script, logger):
+    script.returncode = 2
+    script.stderr = "toggle failed\n"
+    lookups.hostname = BACKUP_PTR
+
+    status, _ = monitor.check_once()
+
+    assert not status.on_primary
+    assert "State change script exited with code 2: toggle failed" in _messages(logger, "error")
+
+
+def test_state_change_script_error_is_logged_not_raised(monitor, lookups, script, logger):
+    script.error = RuntimeError("State change script hook.sh did not finish within 60s and was stopped.")
+    lookups.hostname = BACKUP_PTR
+
+    monitor.check_once()
+
+    assert script.error.args[0] in _messages(logger, "error")
+    logger.ping_heartbeat.assert_called_once_with(is_fail=True)
+
+
+def test_state_change_script_output_is_logged(monitor, lookups, script, logger):
+    script.stdout = "backblaze set to manual\n"
+    lookups.hostname = BACKUP_PTR
+
+    monitor.check_once()
+
+    assert "Running state change script: hook.sh --on_primary false" in _messages(logger, "summary")
+    assert "State change script output: backblaze set to manual" in _messages(logger, "detailed")

@@ -20,6 +20,7 @@ class ConfigSchema:
                 "schema": {
                     "AppName": {"type": "string", "required": False, "nullable": True},
                     "CheckInterval": {"type": "number", "required": False, "nullable": True, "min": 5, "max": 3600},
+                    "StateChangeScript": {"type": "string", "required": False, "nullable": True},
                 },
             },
             "WAN": {
