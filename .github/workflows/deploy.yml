@@ -9,11 +9,13 @@ on:
         type: choice
         options:
           - sydneyapp
+          - MacMiniAU
+          - all
 
 jobs:
   deploy-sydneyapp:
     name: Deploy wan_failover_check → sydneyapp
-    if: ${{ inputs.environment == 'sydneyapp' }}
+    if: ${{ inputs.environment == 'sydneyapp' || inputs.environment == 'all' }}
     runs-on: [self-hosted, sydneyapp]
     environment: sydneyapp        # triggers approval gate if configured in GitHub
     steps:

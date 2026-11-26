@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Single launchd USER agent that runs all the daily finance jobs in sequence.
+  Must be a user agent (not a daemon / cron) so Excel and Banktivity AppleScript
+  automation runs inside the GUI login session.
+
+  Install:
+    cp deploy/com.elseyworld.finance-orchestrator.plist ~/Library/LaunchAgents/
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.elseyworld.finance-orchestrator.plist
+  Test now:
+    launchctl kickstart -k gui/$(id -u)/com.elseyworld.finance-orchestrator
+
+  No 1Password token here: each project script loads
+  ~/.config/op/service-account-token itself.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.elseyworld.finance-orchestrator</string>
+
+    <!-- Apple-signed /bin/bash for a stable TCC identity (see the old agents).
+         orchestrate.sh re-execs itself under caffeinate -d -i -m -s -u. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/nick/scripts/finance_orchestrator/scripts/orchestrate.sh</string>
+    </array>
+
+    <!-- Matches the pmset wake at 05:00. launchd runs a missed calendar job
+         when the Mac wakes. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>   <integer>5</integer>
+        <key>Minute</key> <integer>0</integer>
+    </dict>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/nick/scripts/finance_orchestrator</string>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/nick/scripts/finance_orchestrator/logs/user_agent.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/nick/scripts/finance_orchestrator/logs/user_agent.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HOME</key>
+        <string>/Users/nick</string>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    </dict>
+</dict>
+</plist>
