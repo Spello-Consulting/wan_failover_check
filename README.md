@@ -1,328 +1,453 @@
 # WAN Failover Check
 
-WAN Failover Check monitors whether your connection is on the primary NBN service or on a backup WAN connection such as 5G failover.
+WAN Failover Check monitors whether the network is on the primary NBN connection or on a backup
+WAN connection such as 5G failover.
 
-It works by comparing the current public IP address with the expected NBN static IP. From that single check, the app can:
+It finds the current public IP address, looks up that address's reverse DNS (PTR) name, and
+compares the name with patterns you configure. With Aussie Broadband, for example, the primary
+connection's PTR name looks like `180-150-43-236.b4962b.syd.aussiebb.net`, so the pattern
+`*.aussiebb.net` identifies it. Any other name, or no PTR record at all, means the backup
+connection is active. This works whether the primary connection has a static or a dynamic IP.
 
-- report the current WAN state
+From each check the app can:
+
+- report the current WAN state on the console and in a log file
 - write the latest state to `status.json`
-- keep a historical CSV log of failover periods
-- optionally ping Better Stack heartbeats
-- expose a small HTTP status endpoint
-- support helper automation such as Backblaze mode switching
+- keep a CSV history of failover periods
+- send Better Stack heartbeats (a "fail" heartbeat while on the backup connection)
+- serve the latest state over HTTP at `GET /status`
+- run a script of your own when the WAN moves between primary and backup
 
-## What the app does
+## Prerequisites
 
-The main program is `wan_check.py`.
+- Python 3.13+ — `brew install python@3.13`
+- [uv](https://docs.astral.sh/uv/) — `brew install uv`
+- Internet access to at least one of the public IP echo services listed under
+  [How WAN detection works](#how-wan-detection-works)
 
-On each WAN check it:
+`scripts/launch.sh` runs `uv sync` to install dependencies into the virtual environment
+automatically.
 
-- queries multiple public IP echo services until one succeeds
-- compares the result to the configured primary WAN IP
-- classifies the connection as `NBN (primary)` or `5G Backup`
-- updates `status.json`
-- updates `failover_history.csv`
-- optionally sends a Better Stack heartbeat
+> **macOS note:** to let the app reach the local network, allow your terminal/IDE under
+> *System Settings > Privacy and Security > Local Network*.
 
-When running in monitor mode, it repeats the check on a timer and logs transitions.
+## Project layout
 
-## Project files
-
-- `wan_check.py`: main monitor and optional status API
-- `scripts/launch.sh`: launcher script that loads `.env`, runs `uv sync`, and starts the app
-- `scripts/manage_backblaze.sh`: helper that switches a Backblaze-related script based on current WAN state
-- `status.json`: latest observed WAN state
-- `failover_history.csv`: history of backup WAN periods, created automatically
-- `pyproject.toml`: project metadata and dependencies
-
-## Requirements
-
-- Python 3.13 or newer
-- `uv`
-- internet access to at least one supported public IP echo service
-
-The repository is already set up to use `uv` for dependency management.
-
-## Installation
-
-From the repository root:
-
-```bash
-uv sync
+```text
+configs/
+  development.yaml      config for the dev environment
+  production.yaml       config for production (sydneyapp)
+src/
+  main.py               entry point: CLI, config and logging set-up, run modes, config reload
+  config_schemas.py     validation schema for the app's config sections
+  wan_detector.py       public IP -> reverse DNS -> pattern match
+  wan_monitor.py        runs checks, writes outputs, sends heartbeats, monitor loop
+  status_store.py       reads and writes status.json
+  failover_history.py   maintains the failover history CSV
+  state_change_script.py  runs the optional script on primary/backup changes
+  status_api.py         FastAPI app for GET /status
+scripts/
+  launch.sh             standard launcher (pyutil-managed; do not edit here)
+  backblaze_control.sh  state change script: stops Backblaze on the backup WAN
+deploy/sydneyapp/       systemd service file for the production host
+tests/                  pytest suite
 ```
 
-To run directly with `uv`:
+The app is built on [sc-foundation-services](https://github.com/Spello-Consulting/sc-foundation):
+`SCConfigManager` for the YAML config, `SCLogger` for logging, email and heartbeats,
+`ThreadManager` for the monitor and API threads, `CSVReader` for the failover history,
+`JSONEncoder` for atomic status file writes, `DateHelper` for timestamps, and
+`SCCommon.get_external_ip()` for the public IP lookup.
+
+## Setup
 
 ```bash
-uv run wan_check.py --onetime
+uv sync --extra all
 ```
+
+Then select the environment file for this checkout:
+
+```bash
+ln -s .env.dev.template .env.target
+```
+
+Use `.env.prod.template` on the production host instead. `.env.target` is gitignored, so each
+checkout keeps its own choice.
+
+## Environment files
+
+The app has no secrets, so the environment templates only select the environment and config file:
+
+| Variable     | Purpose                                                              |
+| ------------ | -------------------------------------------------------------------- |
+| `APP_ENV`    | `development` or `production`; `launch.sh` refuses to run without it |
+| `APP_CONFIG` | config file passed to the app as `--config`                          |
+
+`launch.sh` resolves `.env.target` through `op run`, so 1Password `op://` references can be
+added later if the app ever needs secrets.
 
 ## Configuration
 
-Configuration is driven primarily by environment variables, with one command-line override for the NBN IP.
+All settings live in the YAML config file. The file is validated at start-up, and the app exits
+with an error that names the bad setting if validation fails.
 
-### Environment variables
+In monitor mode you can edit the config file while the app runs, and the changes take effect
+without a restart. See [Config changes while running](#config-changes-while-running).
 
-- `NBN_STATIC_IP`: expected public IP of the primary NBN connection
-- `HEARTBEAT_PRIMARY`: Better Stack heartbeat URL to use when on primary WAN
-- `HEARTBEAT_LTE`: Better Stack heartbeat URL to use when on backup WAN
-- `MONITOR_INTERVAL`: monitor polling interval in seconds, default `60`
-- `API_IP`: bind address for the optional HTTP status API; if unset, the API is disabled
-- `API_PORT`: port for the HTTP status API, default `8080`
-- `FAILOVER_CSV_FILE`: path to the failover history CSV, default `failover_history.csv`
+### `General`
 
-### Typical `.env` example
+| Key                 | Default | Meaning                                                                       |
+| ------------------- | ------- | ----------------------------------------------------------------------------- |
+| `AppName`           | —       | Informational                                                                 |
+| `CheckInterval`     | `60`    | Seconds between checks in monitor mode (5–3600)                               |
+| `StateChangeScript` | none    | Executable to run when the WAN moves between primary and backup. See [State change script](#state-change-script). |
 
-```dotenv
-NBN_STATIC_IP=180.150.43.236
-HEARTBEAT_PRIMARY=https://betterstack.example/primary
-HEARTBEAT_LTE=https://betterstack.example/failover
-MONITOR_INTERVAL=60
-API_IP=0.0.0.0
-API_PORT=8080
-FAILOVER_CSV_FILE=failover_history.csv
-```
+### `WAN`
 
-### Command-line override
+| Key                   | Default                | Meaning                                                                                    |
+| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------ |
+| `PrimaryMatch`        | required               | List of glob patterns matched against the PTR name, e.g. `"*.aussiebb.net"`. Case-insensitive; a trailing dot on the PTR name is ignored. A match on any pattern means primary. |
+| `PrimaryLabel`        | `NBN (primary)`        | State label when on the primary connection                                                 |
+| `BackupLabel`         | `5G Backup`            | State label when on the backup connection                                                  |
+| `StatusFile`          | `status.json`          | Where to write the latest state                                                            |
+| `FailoverHistoryFile` | `failover_history.csv` | Where to record failover periods                                                           |
+| `DNSTimeout`          | `5`                    | Seconds allowed for the reverse DNS lookup (1–60)                                          |
 
-Use `--nbn-ip <ip>` to override `NBN_STATIC_IP` for any run mode.
+A bare file name such as `status.json` goes in the project root. A relative path such as
+`data/status.json` is resolved from the working directory (`launch.sh` changes to the project
+root first). Absolute paths are used as given.
 
-Example:
+Patterns use shell-style globbing: `*` matches any run of characters (including dots), `?`
+matches one character. `*.aussiebb.net` matches `x.syd.aussiebb.net` but not `aussiebb.net` itself.
+
+### `StatusAPI`
+
+| Key      | Default   | Meaning                         |
+| -------- | --------- | ------------------------------- |
+| `Enable` | `False`   | Serve `GET /status`             |
+| `Host`   | `0.0.0.0` | Bind address                    |
+| `Port`   | `8080`    | TCP port (the configs use 8087) |
+
+### `HeartbeatMonitor`
+
+Standard sc-foundation heartbeat settings.
+
+| Key                | Meaning                                                                       |
+| ------------------ | ----------------------------------------------------------------------------- |
+| `Enable`           | Send heartbeats in monitor mode                                               |
+| `WebsiteURL`       | Better Stack heartbeat URL                                                    |
+| `HeartbeatTimeout` | Request timeout in seconds                                                    |
+| `Frequency`        | Minimum seconds between pings. Keep it at or below `CheckInterval`, or some checks won't ping. |
+
+After each successful check the app pings `WebsiteURL` on the primary connection and
+`WebsiteURL/fail` on the backup connection. It sends no heartbeat when the state can't be
+determined. Heartbeats are only sent in monitor mode.
+
+### `Files` and `Email`
+
+Standard sc-foundation logging and email sections. Logs go to `logs/logfile.log`. Email is
+disabled in both configs. If you enable it, the SMTP settings come from the `SMTP_*` environment
+variables. A fatal error is recorded in `<project>_fatal_error.txt` and, when email is enabled,
+reported by email, with a recovery email on the next successful start.
+
+## How WAN detection works
+
+1. Get the public IP from the first of these services that answers: `https://api.ipify.org`,
+   `https://icanhazip.com`, `https://ifconfig.me/ip`, `https://checkip.amazonaws.com`.
+2. Look up the PTR name for that IP, waiting at most `DNSTimeout` seconds.
+3. Classify the result:
+
+| Outcome                                     | State label         | `on_primary` | Failover CSV | Heartbeat     |
+| ------------------------------------------- | ------------------- | ------------ | ------------ | ------------- |
+| PTR name matches a `PrimaryMatch` pattern   | `PrimaryLabel`      | `true`       | closes an open row | primary |
+| PTR name doesn't match, or no PTR record    | `BackupLabel`       | `false`      | opens a row  | fail          |
+| Every IP echo service failed                | `No internet`       | `false`      | unchanged    | none          |
+| Resolver error or timeout on the PTR lookup | `DNS lookup failed` | `false`      | unchanged    | none          |
+
+The last two states always update `status.json`, so the API never serves stale data. They don't
+touch the failover history, so a flaky resolver can't record a false failover.
+
+## Running the app
+
+### Monitor mode (default)
 
 ```bash
-uv run wan_check.py --nbn-ip 180.150.43.236 --onetime
+./scripts/launch.sh
 ```
 
-If both are present, `--nbn-ip` takes precedence over `NBN_STATIC_IP`.
-
-## Usage
-
-### Continuous monitor mode
-
-This is the default mode when no mutually exclusive mode flag is supplied.
+`launch.sh` loads `.env.target`, adds `--config $APP_CONFIG`, runs `uv sync`, and starts
+`src/main.py`. To run the app directly instead:
 
 ```bash
-uv run wan_check.py
+uv run src/main.py --config configs/development.yaml
 ```
 
-Behavior:
+In monitor mode the app:
 
-- starts the optional HTTP API if `API_IP` is set
-- checks WAN state every `MONITOR_INTERVAL` seconds
-- writes `status.json` on every check
-- updates the failover CSV on every check
-- sends Better Stack heartbeats unless disabled
-- prints transition and status messages to stdout
-- backs off polling after repeated check failures
+- starts the status API if `StatusAPI.Enable` is set
+- checks the WAN every `CheckInterval` seconds, writing `status.json` and the failover CSV
+- sends heartbeats unless disabled
+- logs a summary line whenever the state changes, and a detailed line on every check
+- runs the `StateChangeScript`, if set, when the WAN moves between primary and backup
+- backs off to 2× and then 3× the interval after consecutive failed checks or heartbeats
+- applies config file changes without a restart (see below)
+- shuts down cleanly on Ctrl-C or SIGTERM (`systemctl stop`)
 
-Disable heartbeats for a run:
+#### Config changes while running
+
+In monitor mode the app checks the config file for changes every 5 seconds. When the file
+changes, it reloads and validates it, builds a new monitor and status API, and reapplies the
+`Files`, `Email` and `HeartbeatMonitor` settings to the logger. Then it restarts the monitor and
+API threads with the new settings. Every setting takes effect this way, including the status API
+host and port and the `StateChangeScript`. The `Monitoring started` summary lines are logged again
+with the new values. The status API is unavailable for a moment while it restarts.
+
+If the edited file has a YAML or validation error, or the new `StateChangeScript` is missing or
+not executable, the app logs the error once and keeps running with its current settings. It
+tries again the next time the file is saved.
+
+`--onetime` and `--onprimary` runs read the config once and don't watch it.
+
+### Command-line options
+
+| Option            | Meaning                                                                    |
+| ----------------- | -------------------------------------------------------------------------- |
+| `--config FILE`   | Config file, relative to the project root or absolute                      |
+| `--homedir PATH`  | Override the project root                                                  |
+| `--onetime`       | Run one check, write the outputs, print the result, and exit               |
+| `--onprimary`     | Run one check, write the outputs, print exactly `Yes` or `No`, and exit    |
+| `--noheartbeat`   | Don't send heartbeats in this run                                          |
+
+`--onetime` and `--onprimary` can't be combined, and neither sends heartbeats.
 
 ```bash
-uv run wan_check.py --noheartbeat
+uv run src/main.py --config configs/development.yaml --onetime
 ```
-
-### One-time check
-
-Runs one WAN check, writes outputs, prints the result, and exits.
-
-```bash
-uv run wan_check.py --onetime
-```
-
-Example output:
 
 ```text
-[ok] NBN (primary)  ext-ip=180.150.43.236
+[ok] NBN (primary)  ext-ip=180.150.43.236  rdns=180-150-43-236.b4962b.syd.static.aussiebb.net
 ```
 
-### Primary-status check
+In `--onprimary` mode, stdout carries only `Yes` or `No`. Log output is limited to errors, which
+go to stderr, so scripts can capture the result directly.
 
-Prints `Yes` when on the primary connection and `No` otherwise.
+### Exit codes
 
-```bash
-uv run wan_check.py --onprimary
-```
+| Code | Meaning                                                                      |
+| ---- | ---------------------------------------------------------------------------- |
+| `0`  | Successful one-time check, or clean shutdown of monitor mode                 |
+| `1`  | Configuration error, start-up error, or a one-time check that couldn't determine the state |
+| `1`  | A managed thread crashed fatally in monitor mode, so systemd restarts the service |
 
-This mode still performs a real WAN check using the same comparison logic as the other modes.
-
-## Output files
+## Outputs
 
 ### `status.json`
 
-The app writes the most recent WAN state to `status.json`.
-
-Example:
-
 ```json
 {
-	"timestamp": "2026-04-09T07:01:13Z",
-	"on_primary": true,
-	"status": "NBN (primary)",
-	"external_ip": "180.150.43.236"
+    "timestamp": "2026-11-26T01:00:00Z",
+    "on_primary": true,
+    "status": "NBN (primary)",
+    "external_ip": "180.150.43.236",
+    "reverse_dns": "180-150-43-236.b4962b.syd.static.aussiebb.net"
 }
 ```
 
-Fields:
+| Field         | Meaning                                                        |
+| ------------- | -------------------------------------------------------------- |
+| `timestamp`   | UTC time of the check                                          |
+| `on_primary`  | `true` only when the primary connection was detected           |
+| `status`      | State label (see the table under How WAN detection works)      |
+| `external_ip` | Public IP, or `null` when no echo service answered             |
+| `reverse_dns` | PTR name (lower case, no trailing dot), or `null` if none      |
 
-- `timestamp`: UTC timestamp of the recorded status
-- `on_primary`: `true` when the app believes the connection is on NBN
-- `status`: human-readable state label
-- `external_ip`: detected public IP address, or `null` when it could not be determined
+The file is replaced atomically on every check.
 
-If every IP echo service fails (for example, no internet access or DNS resolution is broken), `status.json` is overwritten with a `No internet` state so the status API never serves stale data:
+### Failover history CSV
 
-```json
-{
-	"timestamp": "2026-10-22T10:19:10Z",
-	"on_primary": false,
-	"status": "No internet",
-	"external_ip": null
-}
-```
+| Column           | Meaning                                                  |
+| ---------------- | -------------------------------------------------------- |
+| `Start Time`     | When the backup connection was first seen (local time)   |
+| `End Time`       | When the primary connection returned; empty while open   |
+| `Duration Hours` | Length of the failover period, to two decimal places     |
 
-The failover CSV is not updated and no heartbeat is sent in this state.
-
-### `failover_history.csv`
-
-The app writes failover periods to `failover_history.csv`, or to the path defined by `FAILOVER_CSV_FILE`.
-
-The CSV is created automatically with these columns:
-
-- `Start Time`
-- `End Time`
-- `Duration Hours`
-
-Behavior:
-
-- when WAN moves to backup, the app opens a new CSV row if there is no open row already
-- while WAN remains on backup, no duplicate open row is created
-- when WAN returns to primary, the app fills in `End Time`
-- the app calculates `Duration Hours` when the failover closes
-- `Start Time` and `End Time` are written in local time as `yyyy-mm-dd hh:mm:ss`
-
-Example:
+Times are written as `yyyy-mm-dd hh:mm:ss`. The file is created on the first failover. Only one
+row is open at a time, and durations that span a daylight-saving change are calculated correctly.
 
 ```csv
 Start Time,End Time,Duration Hours
 2026-04-09 10:00:00,2026-04-09 12:30:00,2.50
 ```
 
-## Better Stack heartbeats
-
-If heartbeats are enabled, the app sends a POST request to:
-
-- `HEARTBEAT_PRIMARY` when on primary WAN
-- `HEARTBEAT_LTE` when on backup WAN
-
-Heartbeats are enabled only when:
-
-- `--noheartbeat` is not used
-- `HEARTBEAT_PRIMARY` is configured
-
-If the selected heartbeat URL is missing, that heartbeat is skipped.
-
 ## HTTP status API
 
-If `API_IP` is set, the app starts a FastAPI server and exposes:
+When `StatusAPI.Enable` is set, the app serves the contents of `status.json`:
 
-- `GET /status`
+```bash
+curl http://127.0.0.1:8087/status
+```
 
-Default port is `8080`, configurable via `API_PORT`.
+The endpoint returns HTTP `503` with an `error` field if the status file doesn't exist yet or
+can't be read.
 
-Example:
+## State change script
+
+Set `General.StateChangeScript` to have the app run a script whenever the WAN moves from primary
+to backup or back again:
+
+```yaml
+General:
+  StateChangeScript: scripts/wan_state_change.sh
+```
+
+The script is called with one argument pair giving the new state:
+
+```bash
+scripts/wan_state_change.sh --on_primary true    # now on the primary connection
+scripts/wan_state_change.sh --on_primary false   # now on the backup connection
+```
+
+It also gets these environment variables:
+
+| Variable          | Value                                              |
+| ----------------- | -------------------------------------------------- |
+| `WAN_STATUS`      | The state label, e.g. `5G Backup`                  |
+| `WAN_EXTERNAL_IP` | The public IP                                      |
+| `WAN_REVERSE_DNS` | The PTR name, or empty if there is none            |
+
+How it behaves:
+
+- **When it runs.** The trigger is the failover history: the script runs when a failover row is
+  opened (primary → backup) or closed (backup → primary). The history file holds the last known
+  state, so each change runs the script once, even across restarts, and whether the change is
+  first seen in monitor mode or by an `--onetime` / `--onprimary` run. Nothing runs on a check
+  that finds the same state, or at start-up when the state hasn't changed.
+- **What doesn't count as a change.** `No internet` and `DNS lookup failed` don't run the script.
+  Going primary → no internet → primary runs nothing; primary → no internet → backup runs it once.
+- **Where it runs.** The working directory is the project root, and a relative path is resolved
+  from there. The script must exist and be executable (`chmod +x`), or the app exits at start-up
+  with a configuration error.
+- **Output and failures.** Stdout and stderr are captured and written to the log, so
+  `--onprimary` output stays `Yes` / `No`. A non-zero exit code, a failure to start, or a run
+  longer than 60 seconds (the script is then killed) is logged as an error; the app carries on.
+  Checks wait while the script runs, so keep it short.
+- **If the history file can't be read or written,** the change can't be detected and the script
+  doesn't run. The error is logged.
+
+A minimal script:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${2:-}" == "true" ]]; then
+    echo "Back on ${WAN_STATUS}"
+else
+    echo "Failed over to ${WAN_STATUS}"
+fi
+```
+
+### Backblaze control script
+
+`scripts/backblaze_control.sh` is a ready-made state change script for a Mac running Backblaze.
+It stops Backblaze when the WAN fails over to the backup connection, so backups don't use 5G
+data, and starts it again when the primary connection is back.
+
+```yaml
+General:
+  StateChangeScript: scripts/backblaze_control.sh
+```
+
+It can also be run by hand:
+
+```bash
+scripts/backblaze_control.sh status
+scripts/backblaze_control.sh stop
+scripts/backblaze_control.sh start
+```
+
+Backblaze runs as two launchd jobs, and the script handles both:
+
+| Job                     | What it is                                  | Stop / start                                      |
+| ----------------------- | ------------------------------------------- | ------------------------------------------------- |
+| `com.backblaze.bzserv`  | System LaunchDaemon (root) that runs backups | `launchctl bootout` / `bootstrap`, through `sudo -n` |
+| `com.backblaze.bzbmenu` | Your LaunchAgent for the menu bar icon      | `launchctl bootout` / `bootstrap`, no root needed |
+
+Both jobs have `KeepAlive`, so quitting or killing them only makes launchd restart them; they
+have to be booted out. On stop the script also ends any `bztransmit` / `bzfilelist` helpers
+that are still running. Stopping and starting are idempotent, and a problem with the menu bar
+app is only a warning. Nothing persists across a reboot: Backblaze always starts after a
+restart, even on the backup connection, until the next primary → backup change.
+
+**It must run on the Mac that runs Backblaze**, not on sydneyapp. Run the app there as well,
+for example from cron with `--onprimary` (a one-shot run still triggers the script on a change):
 
 ```text
-http://<API_IP>:8080/status
+*/5 * * * * cd /path/to/wan_failover_check && uv run --quiet src/main.py --config configs/<config>.yaml --onprimary >/dev/null 2>&1
 ```
 
-The endpoint returns the contents of `status.json`.
-
-If the file is unavailable or invalid JSON, the endpoint returns HTTP `503` with an error payload.
-
-## Supported IP echo services
-
-The app tries the following services in order until one returns a usable IP:
-
-- `https://api.ipify.org`
-- `https://icanhazip.com`
-- `https://ifconfig.me/ip`
-- `https://checkip.amazonaws.com`
-
-If they all fail, the check fails for that cycle and `status.json` is set to the `No internet` state.
-
-## Helper scripts
-
-### `scripts/launch.sh`
-
-`scripts/launch.sh` is a convenience wrapper for starting the application consistently.
-
-It:
-
-- changes to the chosen home directory
-- loads `.env` if present
-- reads the launch target from `pyproject.toml`
-- ensures `uv` is available
-- runs `uv sync`
-- starts the app with `uv run`
-- exits cleanly on `SIGINT` or `SIGTERM`
-
-Default usage:
+**Sudoers rule.** The script runs its root commands with `sudo -n`, which fails instead of
+asking for a password. Allow exactly those commands, without a password, for the user that runs
+the app:
 
 ```bash
-./scripts/launch.sh
+sudo visudo -f /etc/sudoers.d/backblaze-control
 ```
-
-Override the working directory:
-
-```bash
-./scripts/launch.sh --homedir /path/to/wan_failover_check
-```
-
-Pass normal app arguments through the launcher:
-
-```bash
-./scripts/launch.sh --onetime --nbn-ip 180.150.43.236
-```
-
-### `scripts/manage_backblaze.sh`
-
-`scripts/manage_backblaze.sh` uses the current WAN state to switch an external Backblaze helper script between two modes.
-
-It:
-
-- activates the local virtual environment
-- loads `.env` if present
-- runs `uv sync`
-- executes `wan_check.py --onprimary`
-- runs the external toggle script in `continuous` mode when WAN is primary
-- runs the external toggle script in `manual` mode when WAN is backup
-
-This script expects the external toggle script to exist at:
 
 ```text
-$HOME/scripts/toggle_backblaze_settings/toggle_backblaze_settings.sh
+<user> ALL=(root) NOPASSWD: /bin/launchctl bootout system/com.backblaze.bzserv, /bin/launchctl bootstrap system /Library/LaunchDaemons/com.backblaze.bzserv.plist, /usr/bin/pkill -x bztransmit, /usr/bin/pkill -x bzfilelist
 ```
 
-## Exit behavior
+Check it with `sudo -n -l`. Without the rule, `stop` and `start` exit 1 with an error that
+points here, and the app logs it.
 
-- a normal successful one-time run exits with code `0`
-- monitor mode exits with code `0` on Ctrl-C
-- configuration errors return a non-zero exit code
-- total IP lookup failure for a one-time run returns a non-zero exit code
+## Deployment
 
-## Notes
+The `Deploy wan_failover_check` GitHub workflow and `deploy/auto-deploy.yaml` deploy to
+sydneyapp, which runs the app as a systemd service using
+`deploy/sydneyapp/wan-failover-check.service`.
 
-- `status.json` timestamps are UTC
-- failover CSV timestamps are local time
-- the app uses a simple IP comparison model: if the current public IP matches the configured NBN IP, the connection is treated as primary
-- the labels are currently `NBN (primary)` and `5G Backup`, but the backup path is effectively any non-primary public IP
-
-## Quick test commands
+To install the service manually:
 
 ```bash
-uv run wan_check.py --onetime
-uv run wan_check.py --onprimary
-uv run wan_check.py --nbn-ip 180.150.43.236 --onetime
-uv run wan_check.py --noheartbeat
-curl http://127.0.0.1:8080/status
+sudo cp deploy/sydneyapp/wan-failover-check.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now wan-failover-check
+journalctl -u wan-failover-check -f
 ```
+
+On the production host, `.env.target` must point at the production template:
+
+```bash
+ln -s .env.prod.template .env.target
+```
+
+## Development
+
+```bash
+uv sync --extra all          # install dev dependencies
+uv run ruff check src tests  # lint
+uv run mypy src              # type-check (strict)
+uv run pytest                # run the test suite
+```
+
+The tests mock all network access (IP echo services, DNS and heartbeats), so they run offline.
+
+## Upgrading from 1.x
+
+Version 2.0 replaces the static-IP comparison with reverse DNS matching and moves all settings
+from environment variables to YAML:
+
+| 1.x environment variable / option | 2.0 setting                                      |
+| --------------------------------- | ------------------------------------------------ |
+| `NBN_STATIC_IP`, `--nbn-ip`       | `WAN.PrimaryMatch` (PTR name patterns)           |
+| `HEARTBEAT_PRIMARY`               | `HeartbeatMonitor.WebsiteURL`                    |
+| `HEARTBEAT_LTE`                   | not needed: `WebsiteURL/fail` is sent automatically |
+| `MONITOR_INTERVAL`                | `General.CheckInterval`                          |
+| `API_IP`                          | `StatusAPI.Enable` and `StatusAPI.Host`          |
+| `API_PORT`                        | `StatusAPI.Port`                                 |
+| `FAILOVER_CSV_FILE`               | `WAN.FailoverHistoryFile`                        |
+| `wan_check.py`                    | `src/main.py`                                    |
+| `manage_backblaze.sh`             | removed: use `General.StateChangeScript` with `scripts/backblaze_control.sh` |
+
+`status.json` keeps its 1.x fields and adds `reverse_dns`. Existing failover history files are
+read and updated without changes.

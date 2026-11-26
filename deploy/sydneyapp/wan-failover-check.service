@@ -1,23 +1,24 @@
+# Systemd service file for WAN Failover Check
 [Unit]
 Description=WAN Failover Check
-After=network.target
+After=network-online.target
+Wants=network-online.target
 # Limit restart attempts (3 times in 60 seconds)
 StartLimitIntervalSec=60
 StartLimitBurst=3
 
 [Service]
+User=nick
 ExecStart=/home/nick/scripts/wan_failover_check/scripts/launch.sh
 WorkingDirectory=/home/nick/scripts/wan_failover_check
 StandardOutput=inherit
 StandardError=inherit
-User=nick
+EnvironmentFile=-/home/nick/.config/op/service-account-token
 Environment=PATH=/home/nick/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Logging and restart behavior
 # Only restart on non-zero exit code and wait 10 seconds before restarting
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
-
