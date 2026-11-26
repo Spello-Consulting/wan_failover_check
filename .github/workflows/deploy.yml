@@ -37,3 +37,21 @@ jobs:
           sleep 6
           sudo --chdir=/home/nick/scripts/wan_failover_check /home/nick/scripts/pyutil/servicectrl.sh is-active
 
+  deploy-MacMiniAU:
+    name: Deploy wan_failover_check → MacMiniAU
+    if: ${{ inputs.environment == 'MacMiniAU' || inputs.environment == 'all' }}
+    runs-on: [self-hosted, MacMiniAU]
+    environment: MacMiniAU        # triggers approval gate if configured in GitHub
+    steps:
+      - name: Pull latest from GitHub
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          cd ~/scripts/wan_failover_check
+          ~/scripts/pyutil/gitrefresh.sh --yes --branch "$BRANCH"
+
+      # Deploy wan_failover_check user agent on the production environment
+      - name: Deploy wan_failover_check user agent
+        run: |
+          cd ~/scripts/wan_failover_check
+          ~/scripts/pyutil/useragentctrl.sh --yes deploy
