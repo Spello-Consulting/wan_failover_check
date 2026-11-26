@@ -1,0 +1,41 @@
+# Production configuration file for the WAN Failover Check application.
+
+General:
+  AppName: wan-failover-check
+  CheckInterval: 30
+  # Optional executable run with --on_primary true|false when the WAN moves between primary and
+  # backup. Relative paths are from the project root.
+  # StateChangeScript: scripts/wan_state_change.sh
+
+WAN:
+  # Glob patterns matched (case-insensitively) against the reverse DNS name of the public IP.
+  # A match means we are on the primary WAN connection.
+  PrimaryMatch:
+    - "*.aussiebb.net"
+  PrimaryLabel: NBN (primary)
+  BackupLabel: 5G Backup
+  StatusFile: status.json
+  FailoverHistoryFile: failover_history.csv
+  DNSTimeout: 5
+
+StatusAPI:
+  Enable: True
+  Host: 0.0.0.0
+  Port: 8087
+
+Files:
+  LogfileName: logs/logfile.log
+  LogfileMaxLines: 10000
+  LogProcessID: False
+  LogfileVerbosity: detailed
+  ConsoleVerbosity: summary
+
+Email:
+  EnableEmail: True
+  SubjectPrefix: "[wan-failover-check]: "
+
+HeartbeatMonitor:
+  Enable: True
+  WebsiteURL: https://uptime.betterstack.com/api/v1/heartbeat/6G7igh5hSYPSucNUDLV6mZYi
+  HeartbeatTimeout: 5
+  Frequency: 30

@@ -2,7 +2,7 @@
 
 General:
   AppName: wan-failover-check
-  CheckInterval: 30
+  CheckInterval: 10
   # Optional executable run with --on_primary true|false when the WAN moves between primary and
   # backup. Relative paths are from the project root.
   # StateChangeScript: scripts/wan_state_change.sh
@@ -31,11 +31,11 @@ Files:
   ConsoleVerbosity: debug
 
 Email:
-  EnableEmail: False
+  EnableEmail: True
   SubjectPrefix: "[Dev wan-failover-check]: "
 
 HeartbeatMonitor:
   Enable: True
-  WebsiteURL: https://uptime.betterstack.com/api/v1/heartbeat/6G7igh5hSYPSucNUDLV6mZYi
+  WebsiteURL: https://incidents.betterstack.com/api/v1/heartbeat/zcsNtnEQHRDNWJENvcZc94fx
   HeartbeatTimeout: 5
   Frequency: 30

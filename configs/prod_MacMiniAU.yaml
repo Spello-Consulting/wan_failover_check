@@ -5,7 +5,7 @@ General:
   CheckInterval: 30
   # Optional executable run with --on_primary true|false when the WAN moves between primary and
   # backup. Relative paths are from the project root.
-  # StateChangeScript: scripts/wan_state_change.sh
+  StateChangeScript: scripts/backblaze_control.sh
 
 WAN:
   # Glob patterns matched (case-insensitively) against the reverse DNS name of the public IP.
@@ -19,7 +19,7 @@ WAN:
   DNSTimeout: 5
 
 StatusAPI:
-  Enable: True
+  Enable: False
   Host: 0.0.0.0
   Port: 8087
 
@@ -27,7 +27,7 @@ Files:
   LogfileName: logs/logfile.log
   LogfileMaxLines: 10000
   LogProcessID: False
-  LogfileVerbosity: summary
+  LogfileVerbosity: detailed
   ConsoleVerbosity: summary
 
 Email:
@@ -35,7 +35,7 @@ Email:
   SubjectPrefix: "[wan-failover-check]: "
 
 HeartbeatMonitor:
-  Enable: True
+  Enable: False
   WebsiteURL: https://uptime.betterstack.com/api/v1/heartbeat/6G7igh5hSYPSucNUDLV6mZYi
   HeartbeatTimeout: 5
   Frequency: 30
