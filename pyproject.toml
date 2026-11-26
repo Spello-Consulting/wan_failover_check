@@ -5,6 +5,7 @@ description = "WAN Failover Check"
 readme = "README.md"
 requires-python = ">=3.13"
 service_name="wan-failover-check"
+user_agent_name = "com.elseyworld.wan_failover_check"
 launch_path="src/main.py"
 dependencies = [
     "fastapi>=0.135.2",
