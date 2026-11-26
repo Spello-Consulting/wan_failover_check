@@ -253,3 +253,143 @@ def test_missing_state_change_script_exits_1(project, capsys):
 
     assert exit_code == 1
     assert "StateChangeScript" in capsys.readouterr().err
+
+
+# ---- Config file reloading in monitor mode ----
+
+
+def _write_config(project, *, api="False", script="", replacements=()):
+    """Rewrite config.yaml and push its modified time forward so the change is always seen.
+
+    Args:
+        project: The project root.
+        api: Value for StatusAPI.Enable.
+        script: Value for General.StateChangeScript.
+        replacements: (old, new) text replacements to apply to the config.
+    """
+    text = CONFIG.format(api=api, script=script)
+    for old, new in replacements:
+        text = text.replace(old, new)
+    path = project / "config.yaml"
+    previous = path.stat().st_mtime
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, (previous + 10, previous + 10))
+
+
+@pytest.fixture
+def runner(project, lookups, mocker):  # noqa: ARG001
+    """A MonitorRunner started from the project config, with the status API off and heartbeats mocked.
+
+    Yields:
+        The running MonitorRunner.
+    """
+    heartbeat = mocker.patch("sc_foundation.sc_logging.requests.get")
+    heartbeat.return_value.status_code = 200
+    (project / "config.yaml").write_text(CONFIG.format(api="False", script=""), encoding="utf-8")
+    cmd_args = parse_command_line_args(["--homedir", str(project), "--config", "config.yaml"])
+    config, logger = main.initialize_config_and_logging(cmd_args)
+    monitor_runner = main.MonitorRunner(config, logger, threading.Event(), heartbeat_enabled=True)
+    monitor_runner.start(main.build_monitor(config, logger, send_heartbeat=True), None)
+    yield monitor_runner
+    monitor_runner.stop()
+
+
+def test_reload_does_nothing_when_config_unchanged(runner):
+    monitor = runner.monitor
+
+    assert runner.reload_if_changed() is False
+    assert runner.monitor is monitor
+
+
+def test_reload_applies_new_settings(project, runner):
+    _write_config(project, replacements=[("CheckInterval: 30", "CheckInterval: 45"), ('"*.aussiebb.net"', '"*.example.net"')])
+    old_monitor = runner.monitor
+
+    assert runner.reload_if_changed() is True
+    assert runner.monitor is not old_monitor
+    assert runner.monitor.check_interval == 45
+    assert runner.monitor.detector.primary_patterns == ["*.example.net"]
+
+
+def test_reload_updates_logger_and_heartbeat_settings(project, runner):
+    _write_config(project, replacements=[("ConsoleVerbosity: debug", "ConsoleVerbosity: error"), ("Enable: True\n  WebsiteURL", "Enable: False\n  WebsiteURL")])
+
+    assert runner.reload_if_changed() is True
+    assert runner.logger.console_verbosity == "error"
+    assert runner.logger.heartbeat_config == {}
+    assert runner.monitor.send_heartbeat is False
+
+
+def test_reload_with_invalid_config_keeps_current_settings_and_logs_once(project, runner, mocker):
+    log = mocker.spy(runner.logger, "log_message")
+    monitor = runner.monitor
+    _write_config(project, replacements=[('- "*.aussiebb.net"', ""), ("CheckInterval: 30", "CheckInterval: 45")])
+
+    assert runner.reload_if_changed() is False
+    assert runner.reload_if_changed() is False
+    assert runner.monitor is monitor
+    assert runner.monitor.check_interval == 30
+    errors = [c for c in log.call_args_list if c.args[1:] == ("error",)]
+    assert len(errors) == 1
+    assert "keeping the current settings" in errors[0].args[0]
+
+    # Fixing the file is picked up on the next check.
+    _write_config(project, replacements=[("CheckInterval: 30", "CheckInterval: 45")])
+    assert runner.reload_if_changed() is True
+    assert runner.monitor.check_interval == 45
+
+
+def test_reload_with_missing_state_change_script_keeps_current_monitor(project, runner, mocker):
+    log = mocker.spy(runner.logger, "log_message")
+    monitor = runner.monitor
+    _write_config(project, script="scripts/missing.sh", replacements=[("CheckInterval: 30", "CheckInterval: 45")])
+
+    assert runner.reload_if_changed() is False
+    assert runner.monitor is monitor
+    assert runner.monitor.check_interval == 30
+    assert any("StateChangeScript" in c.args[0] for c in log.call_args_list if c.args[1:] == ("error",))
+
+
+def _free_port():
+    with socket.socket() as port_holder:
+        port_holder.bind(("127.0.0.1", 0))
+        return port_holder.getsockname()[1]
+
+
+def _get_status(port, timeout=10):
+    # urllib, not requests: requests.get is mocked for the heartbeat.
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/status", timeout=1) as response:
+                return json.loads(response.read())
+        except OSError:
+            time.sleep(0.05)
+    return None
+
+
+@pytest.mark.usefixtures("lookups")
+def test_monitor_mode_moves_status_api_when_config_changes(project, mocker, monkeypatch, restore_signal_handlers):  # noqa: ARG001
+    """Editing the config while monitor mode runs restarts the status API on the new port."""
+    monkeypatch.setattr(main, "CONFIG_CHECK_INTERVAL", 0.05)
+    first_port, second_port = _free_port(), _free_port()
+    (project / "config.yaml").write_text(CONFIG.format(api="True", script="").replace("Port: 8099", f"Port: {first_port}"), encoding="utf-8")
+    heartbeat = mocker.patch("sc_foundation.sc_logging.requests.get")
+    heartbeat.return_value.status_code = 200
+    seen = {}
+
+    def change_port_then_stop():
+        seen["first"] = _get_status(first_port)
+        _write_config(project, api="True", replacements=[("Port: 8099", f"Port: {second_port}")])
+        seen["second"] = _get_status(second_port)
+        seen["first_after_reload"] = _get_status(first_port, timeout=0.2)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=change_port_then_stop, daemon=True).start()
+
+    exit_code = main.main(["--homedir", str(project), "--config", "config.yaml"])
+
+    assert exit_code == 0
+    assert seen["first"]["status"] == "NBN (primary)"
+    assert seen["second"]["status"] == "NBN (primary)"
+    assert seen["first_after_reload"] is None

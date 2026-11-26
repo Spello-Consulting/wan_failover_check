@@ -38,7 +38,7 @@ configs/
   development.yaml      config for the dev environment
   production.yaml       config for production (sydneyapp)
 src/
-  main.py               entry point: CLI, config and logging set-up, run modes
+  main.py               entry point: CLI, config and logging set-up, run modes, config reload
   config_schemas.py     validation schema for the app's config sections
   wan_detector.py       public IP -> reverse DNS -> pattern match
   wan_monitor.py        runs checks, writes outputs, sends heartbeats, monitor loop
@@ -90,6 +90,9 @@ added later if the app ever needs secrets.
 
 All settings live in the YAML config file. The file is validated at start-up, and the app exits
 with an error that names the bad setting if validation fails.
+
+In monitor mode you can edit the config file while the app runs, and the changes take effect
+without a restart. See [Config changes while running](#config-changes-while-running).
 
 ### `General`
 
@@ -187,7 +190,23 @@ In monitor mode the app:
 - logs a summary line whenever the state changes, and a detailed line on every check
 - runs the `StateChangeScript`, if set, when the WAN moves between primary and backup
 - backs off to 2× and then 3× the interval after consecutive failed checks or heartbeats
+- applies config file changes without a restart (see below)
 - shuts down cleanly on Ctrl-C or SIGTERM (`systemctl stop`)
+
+#### Config changes while running
+
+In monitor mode the app checks the config file for changes every 5 seconds. When the file
+changes, it reloads and validates it, builds a new monitor and status API, and reapplies the
+`Files`, `Email` and `HeartbeatMonitor` settings to the logger. Then it restarts the monitor and
+API threads with the new settings. Every setting takes effect this way, including the status API
+host and port and the `StateChangeScript`. The `Monitoring started` summary lines are logged again
+with the new values. The status API is unavailable for a moment while it restarts.
+
+If the edited file has a YAML or validation error, or the new `StateChangeScript` is missing or
+not executable, the app logs the error once and keeps running with its current settings. It
+tries again the next time the file is saved.
+
+`--onetime` and `--onprimary` runs read the config once and don't watch it.
 
 ### Command-line options
 

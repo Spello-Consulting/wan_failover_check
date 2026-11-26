@@ -5,6 +5,7 @@ matching the reverse DNS name of the public IP address against configured patter
 """
 
 import argparse
+import datetime as dt
 import os
 import platform
 import signal
@@ -37,6 +38,7 @@ DEFAULT_STATUS_FILE = "status.json"
 DEFAULT_HISTORY_FILE = "failover_history.csv"
 DEFAULT_API_HOST = "0.0.0.0"  # noqa: S104 - the status API is meant to be reachable on the LAN
 DEFAULT_API_PORT = 8080
+CONFIG_CHECK_INTERVAL = 5.0  # Seconds between checks of the config file for changes
 
 
 @dataclass(frozen=True)
@@ -308,49 +310,165 @@ def run_single_check(monitor: WANMonitor, onprimary: bool) -> int:
     return 0
 
 
-def run_monitor(monitor: WANMonitor, api: StatusAPIServer | None, logger: SCLogger, stop_event: Event) -> int:
-    """Run the monitor loop (and status API, if enabled) until stop_event is set.
+def apply_logger_config(config: SCConfigManager, logger: SCLogger, heartbeat_config: dict[str, Any] | None) -> None:
+    """Apply the Files, Email and HeartbeatMonitor sections to a running logger.
 
     Args:
-        monitor: The WAN monitor.
-        api: The status API server, or None if disabled.
-        logger: The application logger.
-        stop_event: Set by the signal handlers to shut down.
+        config: The configuration manager, already holding the new settings.
+        logger: The logger to reconfigure in place.
+        heartbeat_config: The heartbeat settings to use, or None to stop sending heartbeats.
 
-    Returns:
-        The process exit code.
-    """
-    thread_manager = ThreadManager(logger, global_stop=stop_event, before_exit=lambda: report_fatal_heartbeat(logger))
-    thread_manager.add(name="wan monitor", target=monitor.run, args=(stop_event,), restart=RestartPolicy(mode="never"))
-    if api is not None:
-        thread_manager.add(
-            name="status api",
-            target=api.serve,
-            args=(stop_event,),
-            restart=RestartPolicy(mode="on_crash", max_restarts=3, backoff_seconds=5.0),
-        )
-        logger.log_message(f"Status API listening on {api.url}", "summary")
+    Raises:
+        TypeError: If the email or heartbeat settings are not valid.
+        ValueError: If required email settings are missing.
+    """  # noqa: DOC502
+    logger.initialise_settings(config.get_logger_settings())
+
+    # SCLogger's register_* methods ignore empty or disabled settings, so clear those directly.
+    email_settings = config.get_email_settings()
+    if email_settings is None:
+        logger.email_settings = None
     else:
-        logger.log_message("Status API disabled; set StatusAPI.Enable to enable it.", "summary")
+        logger.register_email_settings(email_settings)
 
-    if not monitor.send_heartbeat:
-        logger.log_message("Heartbeats disabled.", "summary")
-    if monitor.state_change_script is not None:
-        logger.log_message(f"State change script: {monitor.state_change_script.path}", "summary")
-    logger.log_message(
-        f"Monitoring started. Primary WAN match: {', '.join(monitor.detector.primary_patterns)}  Interval: {monitor.check_interval:g}s",
-        "summary",
-    )
+    if heartbeat_config is None:
+        logger.heartbeat_config = {}
+    else:
+        logger.register_heartbeat_monitor(heartbeat_config)
 
-    thread_manager.start_all()
-    try:
-        while not stop_event.is_set():
-            stop_event.wait(timeout=1.0)
-    finally:
-        thread_manager.stop_all()
-        thread_manager.join_all(timeout_per_thread=10.0)
-        logger.log_message(f"{APP_NAME} stopped.", "summary")
-    return 0
+
+class MonitorRunner:
+    """Runs the WAN monitor and status API, and applies config file changes while they run.
+
+    The main thread checks the config file every config_check_interval seconds. When the file
+    changes, it is loaded and validated, a new monitor and status API are built from it and the
+    logger is reconfigured, and only then are the running threads stopped and replaced. If the new
+    file is invalid or the new monitor can't be built, the error is logged once and the app carries
+    on with the settings it already has.
+    """
+
+    def __init__(
+        self,
+        config: SCConfigManager,
+        logger: SCLogger,
+        stop_event: Event,
+        heartbeat_enabled: bool,
+        config_check_interval: float = CONFIG_CHECK_INTERVAL,
+    ) -> None:
+        """Create the runner.
+
+        Args:
+            config: The configuration manager.
+            logger: The application logger.
+            stop_event: Set by the signal handlers to shut down.
+            heartbeat_enabled: False when heartbeats were disabled on the command line.
+            config_check_interval: Seconds between checks of the config file for changes.
+        """
+        self.config = config
+        self.logger = logger
+        self.stop_event = stop_event
+        self.heartbeat_enabled = heartbeat_enabled
+        self.config_check_interval = config_check_interval
+        self.monitor: WANMonitor | None = None
+        self.api: StatusAPIServer | None = None
+        self._thread_manager: ThreadManager | None = None
+        self._config_modified = config.get_config_file_last_modified() or dt.datetime.now(tz=dt.UTC)
+
+    def start(self, monitor: WANMonitor, api: StatusAPIServer | None) -> None:
+        """Start the monitor (and status API, if enabled) in managed threads.
+
+        Args:
+            monitor: The WAN monitor.
+            api: The status API server, or None if disabled.
+        """
+        # Each set of threads gets its own stop event, so a reload can stop them without
+        # stopping the app.
+        threads_stop = Event()
+        logger = self.logger
+        thread_manager = ThreadManager(logger, global_stop=threads_stop, before_exit=lambda: report_fatal_heartbeat(logger))
+        thread_manager.add(name="wan monitor", target=monitor.run, args=(threads_stop,), restart=RestartPolicy(mode="never"))
+        if api is not None:
+            thread_manager.add(
+                name="status api",
+                target=api.serve,
+                args=(threads_stop,),
+                restart=RestartPolicy(mode="on_crash", max_restarts=3, backoff_seconds=5.0),
+            )
+            logger.log_message(f"Status API listening on {api.url}", "summary")
+        else:
+            logger.log_message("Status API disabled; set StatusAPI.Enable to enable it.", "summary")
+
+        if not monitor.send_heartbeat:
+            logger.log_message("Heartbeats disabled.", "summary")
+        if monitor.state_change_script is not None:
+            logger.log_message(f"State change script: {monitor.state_change_script.path}", "summary")
+        logger.log_message(
+            f"Monitoring started. Primary WAN match: {', '.join(monitor.detector.primary_patterns)}  Interval: {monitor.check_interval:g}s",
+            "summary",
+        )
+
+        thread_manager.start_all()
+        self.monitor = monitor
+        self.api = api
+        self._thread_manager = thread_manager
+
+    def stop(self) -> None:
+        """Stop the running threads and wait for them to finish."""
+        if self._thread_manager is None:
+            return
+        self._thread_manager.stop_all()
+        self._thread_manager.join_all(timeout_per_thread=10.0)
+        self._thread_manager = None
+
+    def reload_if_changed(self) -> bool:
+        """Reload the config file if it has changed, and restart the threads with the new settings.
+
+        Returns:
+            True if new settings were loaded and applied, False if the file is unchanged or the new
+            settings could not be used.
+        """
+        try:
+            modified = self.config.check_for_config_changes(self._config_modified)
+        except RuntimeError as e:
+            # Wait for the next save rather than logging the same error on every check.
+            self._config_modified = self.config.get_config_file_last_modified() or self._config_modified
+            self.logger.log_message(f"Config file changed but could not be loaded; keeping the current settings. {e}", "error")
+            return False
+        if modified is None:
+            return False
+        self._config_modified = modified
+        self.logger.log_message(f"Config file {self.config.config_path} changed; applying the new settings.", "summary")
+
+        heartbeat_config = get_heartbeat_config(self.config, self.heartbeat_enabled)
+        try:
+            monitor = build_monitor(self.config, self.logger, send_heartbeat=heartbeat_config is not None)
+            api = build_status_api(self.config, monitor.status_file)
+            apply_logger_config(self.config, self.logger, heartbeat_config)
+        except (ValueError, TypeError, RuntimeError) as e:
+            self.logger.log_message(f"New config settings could not be applied; keeping the current settings. {e}", "error")
+            return False
+
+        self.stop()
+        self.start(monitor, api)
+        return True
+
+    def run(self, monitor: WANMonitor) -> int:
+        """Run the monitor and status API until stop_event is set, applying config file changes.
+
+        Args:
+            monitor: The WAN monitor built from the initial config.
+
+        Returns:
+            The process exit code.
+        """
+        self.start(monitor, build_status_api(self.config, monitor.status_file))
+        try:
+            while not self.stop_event.wait(timeout=self.config_check_interval):
+                self.reload_if_changed()
+        finally:
+            self.stop()
+            self.logger.log_message(f"{APP_NAME} stopped.", "summary")
+        return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -388,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    return run_monitor(monitor, build_status_api(config, monitor.status_file), logger, stop_event)
+    runner = MonitorRunner(config, logger, stop_event, heartbeat_enabled=not cmd_args.noheartbeat, config_check_interval=CONFIG_CHECK_INTERVAL)
+    return runner.run(monitor)
 
 
 if __name__ == "__main__":
