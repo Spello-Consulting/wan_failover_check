@@ -48,6 +48,7 @@ src/
   status_api.py         FastAPI app for GET /status
 scripts/
   launch.sh             standard launcher (pyutil-managed; do not edit here)
+  backblaze_control.sh  state change script: stops Backblaze on the backup WAN
 deploy/sydneyapp/       systemd service file for the production host
 tests/                  pytest suite
 ```
@@ -326,6 +327,60 @@ else
 fi
 ```
 
+### Backblaze control script
+
+`scripts/backblaze_control.sh` is a ready-made state change script for a Mac running Backblaze.
+It stops Backblaze when the WAN fails over to the backup connection, so backups don't use 5G
+data, and starts it again when the primary connection is back.
+
+```yaml
+General:
+  StateChangeScript: scripts/backblaze_control.sh
+```
+
+It can also be run by hand:
+
+```bash
+scripts/backblaze_control.sh status
+scripts/backblaze_control.sh stop
+scripts/backblaze_control.sh start
+```
+
+Backblaze runs as two launchd jobs, and the script handles both:
+
+| Job                     | What it is                                  | Stop / start                                      |
+| ----------------------- | ------------------------------------------- | ------------------------------------------------- |
+| `com.backblaze.bzserv`  | System LaunchDaemon (root) that runs backups | `launchctl bootout` / `bootstrap`, through `sudo -n` |
+| `com.backblaze.bzbmenu` | Your LaunchAgent for the menu bar icon      | `launchctl bootout` / `bootstrap`, no root needed |
+
+Both jobs have `KeepAlive`, so quitting or killing them only makes launchd restart them; they
+have to be booted out. On stop the script also ends any `bztransmit` / `bzfilelist` helpers
+that are still running. Stopping and starting are idempotent, and a problem with the menu bar
+app is only a warning. Nothing persists across a reboot: Backblaze always starts after a
+restart, even on the backup connection, until the next primary → backup change.
+
+**It must run on the Mac that runs Backblaze**, not on sydneyapp. Run the app there as well,
+for example from cron with `--onprimary` (a one-shot run still triggers the script on a change):
+
+```text
+*/5 * * * * cd /path/to/wan_failover_check && uv run --quiet src/main.py --config configs/<config>.yaml --onprimary >/dev/null 2>&1
+```
+
+**Sudoers rule.** The script runs its root commands with `sudo -n`, which fails instead of
+asking for a password. Allow exactly those commands, without a password, for the user that runs
+the app:
+
+```bash
+sudo visudo -f /etc/sudoers.d/backblaze-control
+```
+
+```text
+<user> ALL=(root) NOPASSWD: /bin/launchctl bootout system/com.backblaze.bzserv, /bin/launchctl bootstrap system /Library/LaunchDaemons/com.backblaze.bzserv.plist, /usr/bin/pkill -x bztransmit, /usr/bin/pkill -x bzfilelist
+```
+
+Check it with `sudo -n -l`. Without the rule, `stop` and `start` exit 1 with an error that
+points here, and the app logs it.
+
 ## Deployment
 
 The `Deploy wan_failover_check` GitHub workflow and `deploy/auto-deploy.yaml` deploy to
@@ -373,7 +428,7 @@ from environment variables to YAML:
 | `API_PORT`                        | `StatusAPI.Port`                                 |
 | `FAILOVER_CSV_FILE`               | `WAN.FailoverHistoryFile`                        |
 | `wan_check.py`                    | `src/main.py`                                    |
-| `manage_backblaze.sh`             | removed: use `General.StateChangeScript`         |
+| `manage_backblaze.sh`             | removed: use `General.StateChangeScript` with `scripts/backblaze_control.sh` |
 
 `status.json` keeps its 1.x fields and adds `reverse_dns`. Existing failover history files are
 read and updated without changes.
